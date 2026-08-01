@@ -128,7 +128,6 @@ else:
     neto_manual = monto_total_facturado / (1 + tasa) if monto_total_facturado > 0 else 0.0
     iva_manual = monto_total_facturado - neto_manual
     
-    # Crear DataFrame sintético para mantener homogeneidad con el resto de la app
     df_emitidos = pd.DataFrame([{
         'Tipo': f'Ventas Totales Declaradas (Manual {alicuota_sel})',
         'Neto_Final': neto_manual,
@@ -144,7 +143,27 @@ file_recibidos = st.sidebar.file_uploader(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("💵 3. Saldos del Período Anterior")
+st.sidebar.header("🎁 3. Beneficio de Reducción")
+tiene_reduccion = st.sidebar.selectbox(
+    "¿Cuenta con beneficio de reducción?",
+    ("No", "Sí")
+)
+
+porcentaje_reduccion = 0.0
+if tiene_reduccion == "Sí":
+    opcion_reduccion = st.sidebar.selectbox(
+        "Seleccionar % de reducción:",
+        ("50%", "30%", "10%")
+    )
+    if opcion_reduccion == "50%":
+        porcentaje_reduccion = 0.50
+    elif opcion_reduccion == "30%":
+        porcentaje_reduccion = 0.30
+    elif opcion_reduccion == "10%":
+        porcentaje_reduccion = 0.10
+
+st.sidebar.markdown("---")
+st.sidebar.header("💵 4. Saldos del Período Anterior")
 saldo_tecnico_anterior = st.sidebar.number_input(
     "Saldo Técnico a Favor del período anterior ($)",
     min_value=0.0,
@@ -174,9 +193,19 @@ if df_emitidos is not None and file_recibidos is not None:
         total_credito_fiscal = df_recibidos['IVA_Final'].sum()
 
         # ---------------------------------------------------------
-        # CÁLCULO DE LA POSICIÓN DE IVA (Borrador F.2002)
+        # CÁLCULO DE LA POSICIÓN DE IVA CON REDUCCIÓN
         # ---------------------------------------------------------
-        diferencia_tecnica = total_debito_fiscal - total_credito_fiscal - saldo_tecnico_anterior
+        diferencia_bruta = total_debito_fiscal - total_credito_fiscal
+
+        monto_reduccion = 0.0
+        # La reducción aplica solo si DF > CF
+        if diferencia_bruta > 0 and porcentaje_reduccion > 0:
+            monto_reduccion = diferencia_bruta * porcentaje_reduccion
+
+        saldo_despues_reduccion = diferencia_bruta - monto_reduccion
+
+        # Subtotal tras restar saldo técnico anterior
+        diferencia_tecnica = saldo_despues_reduccion - saldo_tecnico_anterior
         
         if diferencia_tecnica < 0:
             saldo_tecnico_favor_contribuyente = abs(diferencia_tecnica)
@@ -185,6 +214,7 @@ if df_emitidos is not None and file_recibidos is not None:
             saldo_tecnico_favor_contribuyente = 0.0
             saldo_tecnico_favor_arca = diferencia_tecnica
 
+        # Aplicación de Saldo de Libre Disponibilidad
         if saldo_tecnico_favor_arca > 0:
             diferencia_final = saldo_tecnico_favor_arca - saldo_libre_disp_anterior
             if diferencia_final > 0:
@@ -213,17 +243,32 @@ if df_emitidos is not None and file_recibidos is not None:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Tabla detallada de la posición
+        # Construcción de la tabla detallada de la liquidación
         liquidacion_data = [
             {"Concepto": "(+) IVA Débito Fiscal (Ventas)", "Monto ($)": total_debito_fiscal},
             {"Concepto": "(-) IVA Crédito Fiscal (Compras)", "Monto ($)": -total_credito_fiscal},
-            {"Concepto": "(-) Saldo Técnico a Favor del Período Anterior", "Monto ($)": -saldo_tecnico_anterior},
-            {"Concepto": "= SALDO TÉCNICO A FAVOR DEL CONTRIBUYENTE" if saldo_tecnico_favor_contribuyente > 0 else "= SALDO TÉCNICO A FAVOR DE ARCA", 
+            {"Concepto": "= Saldo a Favor de ARCA (Previo a Reducción)" if diferencia_bruta > 0 else "= Saldo Técnico a Favor Contribuyente", 
+             "Monto ($)": diferencia_bruta}
+        ]
+
+        if monto_reduccion > 0:
+            liquidacion_data.append({
+                "Concepto": f"(-) Reducción del {int(porcentaje_reduccion * 100)}% (Beneficio)", 
+                "Monto ($)": -monto_reduccion
+            })
+            liquidacion_data.append({
+                "Concepto": "= Saldo después de Reducción", 
+                "Monto ($)": saldo_despues_reduccion
+            })
+
+        liquidacion_data.extend([
+            {"Concepto": "(-) Saldo Técnico a Favor Período Anterior", "Monto ($)": -saldo_tecnico_anterior},
+            {"Concepto": "= SALDO TÉCNICO RESULTANTE (A FAVOR CONTRIBUYENTE)" if saldo_tecnico_favor_contribuyente > 0 else "= SALDO TÉCNICO RESULTANTE (A FAVOR DE ARCA)", 
              "Monto ($)": saldo_tecnico_favor_contribuyente if saldo_tecnico_favor_contribuyente > 0 else saldo_tecnico_favor_arca},
             {"Concepto": "(-) Saldo de Libre Disponibilidad Período Anterior", "Monto ($)": -saldo_libre_disp_anterior},
-            {"Concepto": "= SALDO FINAL DEL PERÍODO (A FAVOR CONTRIBUYENTE - LIBRE DISP.)" if saldo_final_a_pagar_arca == 0 else "= SALDO FINAL A PAGAR A ARCA",
+            {"Concepto": "= SALDO FINAL REANUDADO (LIBRE DISPONIBILIDAD)" if saldo_final_a_pagar_arca == 0 else "= SALDO FINAL A PAGAR A ARCA",
              "Monto ($)": saldo_final_libre_disp_remanente if saldo_final_a_pagar_arca == 0 else saldo_final_a_pagar_arca}
-        ]
+        ])
 
         df_liq = pd.DataFrame(liquidacion_data)
         df_liq['Monto ($)'] = df_liq['Monto ($)'].apply(lambda x: f"$ {x:,.2f}")
@@ -321,4 +366,3 @@ if df_emitidos is not None and file_recibidos is not None:
 
 else:
     st.info("👋 Por favor, ingresá o cargá los datos de Ventas y el archivo Excel de 'Mis Comprobantes Recibidos' en el panel lateral para calcular la posición de IVA.")
-    
