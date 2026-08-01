@@ -41,24 +41,110 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("📊 Control y Posición Mensual de IVA")
-st.subheader("Liquidación rápida basada en 'Mis Comprobantes' (Emitidos y Recibidos)")
+st.subheader("Liquidación rápida basada en 'Mis Comprobantes' o Ingreso Manual")
 st.markdown("---")
+
+# ---------------------------------------------------------
+# Función de procesamiento de comprobantes
+# ---------------------------------------------------------
+def procesar_comprobantes(file, es_emitidos=True):
+    """
+    Procesa el archivo Excel de AFIP adaptando la fila de encabezado,
+    multiplicando por el tipo de cambio (si es moneda extranjera) y 
+    asignando signos (+ / -) según la naturaleza del comprobante.
+    Si es comprobantes recibidos, excluye comprobantes tipo "B".
+    """
+    try:
+        df = pd.read_excel(file, header=1)
+        df = df.dropna(subset=['Tipo']).copy()
+        
+        # Filtrar comprobantes B en compras
+        if not es_emitidos:
+            df = df[~df['Tipo'].astype(str).str.contains(r'\bB\b', regex=True, case=False)].copy()
+
+        cols_numericas = ['Tipo Cambio', 'Neto Gravado Total', 'Total IVA', 'Imp. Total']
+        for col in cols_numericas:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            else:
+                df[col] = 0.0
+
+        df['Tipo Cambio'] = df['Tipo Cambio'].apply(lambda x: 1.0 if x <= 0 else x)
+        
+        df['Neto_ARS'] = df['Neto Gravado Total'] * df['Tipo Cambio']
+        df['IVA_ARS'] = df['Total IVA'] * df['Tipo Cambio']
+        df['Total_ARS'] = df['Imp. Total'] * df['Tipo Cambio']
+        
+        def determinar_signo(tipo_comp):
+            tipo = str(tipo_comp).upper()
+            if "CRÉDITO" in tipo or "CREDITO" in tipo:
+                return -1.0
+            return 1.0
+
+        df['Signo'] = df['Tipo'].apply(determinar_signo)
+        
+        df['Neto_Final'] = df['Neto_ARS'] * df['Signo']
+        df['IVA_Final'] = df['IVA_ARS'] * df['Signo']
+        df['Total_Final'] = df['Total_ARS'] * df['Signo']
+        
+        return df
+
+    except Exception as e:
+        st.error(f"Error al procesar el archivo: {str(e)}")
+        return None
 
 # ---------------------------------------------------------
 # Barra Lateral (Inputs)
 # ---------------------------------------------------------
-st.sidebar.header("📁 1. Carga de Archivos")
-file_emitidos = st.sidebar.file_uploader(
-    "Cargar 'Mis Comprobantes Emitidos' (.xlsx)", 
-    type=["xlsx", "xls"]
+st.sidebar.header("📁 1. Carga de Ventas (Débito Fiscal)")
+modo_ventas = st.sidebar.radio(
+    "Seleccionar método de carga de ventas:",
+    ("Subir Excel 'Emitidos'", "Ingreso Manual (Total Facturado)")
 )
+
+df_emitidos = None
+
+if modo_ventas == "Subir Excel 'Emitidos'":
+    file_emitidos = st.sidebar.file_uploader(
+        "Cargar 'Mis Comprobantes Emitidos' (.xlsx)", 
+        type=["xlsx", "xls"]
+    )
+    if file_emitidos:
+        df_emitidos = procesar_comprobantes(file_emitidos, es_emitidos=True)
+else:
+    monto_total_facturado = st.sidebar.number_input(
+        "Monto Total Facturado con IVA ($)",
+        min_value=0.0,
+        value=0.0,
+        step=10000.0,
+        format="%.2f"
+    )
+    alicuota_sel = st.sidebar.selectbox(
+        "Alícuota de IVA aplicable:",
+        ("21.0%", "10.5%")
+    )
+    
+    tasa = 0.21 if alicuota_sel == "21.0%" else 0.105
+    neto_manual = monto_total_facturado / (1 + tasa) if monto_total_facturado > 0 else 0.0
+    iva_manual = monto_total_facturado - neto_manual
+    
+    # Crear DataFrame sintético para mantener homogeneidad con el resto de la app
+    df_emitidos = pd.DataFrame([{
+        'Tipo': f'Ventas Totales Declaradas (Manual {alicuota_sel})',
+        'Neto_Final': neto_manual,
+        'IVA_Final': iva_manual,
+        'Total_Final': monto_total_facturado
+    }])
+
+st.sidebar.markdown("---")
+st.sidebar.header("🛒 2. Carga de Compras (Crédito Fiscal)")
 file_recibidos = st.sidebar.file_uploader(
     "Cargar 'Mis Comprobantes Recibidos' (.xlsx)", 
     type=["xlsx", "xls"]
 )
 
 st.sidebar.markdown("---")
-st.sidebar.header("💵 2. Saldos del Período Anterior")
+st.sidebar.header("💵 3. Saldos del Período Anterior")
 saldo_tecnico_anterior = st.sidebar.number_input(
     "Saldo Técnico a Favor del período anterior ($)",
     min_value=0.0,
@@ -76,70 +162,12 @@ saldo_libre_disp_anterior = st.sidebar.number_input(
 )
 
 # ---------------------------------------------------------
-# Función de procesamiento de comprobantes
-# ---------------------------------------------------------
-def procesar_comprobantes(file, es_emitidos=True):
-    """
-    Procesa el archivo Excel de AFIP adaptando la fila de encabezado,
-    multiplicando por el tipo de cambio (si es moneda extranjera) y 
-    asignando signos (+ / -) según la naturaleza del comprobante.
-    Si es comprobantes recibidos, excluye comprobantes tipo "B".
-    """
-    try:
-        # Los encabezados de AFIP se encuentran en la fila 1 (índice 1 de pandas)
-        df = pd.read_excel(file, header=1)
-        
-        # Eliminar filas vacías o sin tipo de comprobante
-        df = df.dropna(subset=['Tipo']).copy()
-        
-        # Si son comprobantes recibidos, filtrar para excluir comprobantes tipo "B"
-        if not es_emitidos:
-            df = df[~df['Tipo'].astype(str).str.contains(r'\bB\b', regex=True, case=False)].copy()
-
-        # Asegurar tipos numéricos y limpiar valores nulos
-        cols_numericas = ['Tipo Cambio', 'Neto Gravado Total', 'Total IVA', 'Imp. Total']
-        for col in cols_numericas:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            else:
-                df[col] = 0.0
-
-        # Normalizar Tipo de Cambio
-        df['Tipo Cambio'] = df['Tipo Cambio'].apply(lambda x: 1.0 if x <= 0 else x)
-        
-        # Recalcular valores en Pesos si hay Moneda Extranjera
-        df['Neto_ARS'] = df['Neto Gravado Total'] * df['Tipo Cambio']
-        df['IVA_ARS'] = df['Total IVA'] * df['Tipo Cambio']
-        df['Total_ARS'] = df['Imp. Total'] * df['Tipo Cambio']
-        
-        # Asignar signo según tipo de comprobante
-        def determinar_signo(tipo_comp):
-            tipo = str(tipo_comp).upper()
-            if "CRÉDITO" in tipo or "CREDITO" in tipo:
-                return -1.0
-            return 1.0
-
-        df['Signo'] = df['Tipo'].apply(determinar_signo)
-        
-        # Aplicar signo a los montos
-        df['Neto_Final'] = df['Neto_ARS'] * df['Signo']
-        df['IVA_Final'] = df['IVA_ARS'] * df['Signo']
-        df['Total_Final'] = df['Total_ARS'] * df['Signo']
-        
-        return df
-
-    except Exception as e:
-        st.error(f"Error al procesar el archivo: {str(e)}")
-        return None
-
-# ---------------------------------------------------------
 # Lógica Principal de la Aplicación
 # ---------------------------------------------------------
-if file_emitidos and file_recibidos:
-    df_emitidos = procesar_comprobantes(file_emitidos, es_emitidos=True)
+if df_emitidos is not None and file_recibidos is not None:
     df_recibidos = procesar_comprobantes(file_recibidos, es_emitidos=False)
 
-    if df_emitidos is not None and df_recibidos is not None:
+    if df_recibidos is not None:
         
         # Totales principales
         total_debito_fiscal = df_emitidos['IVA_Final'].sum()
@@ -148,8 +176,6 @@ if file_emitidos and file_recibidos:
         # ---------------------------------------------------------
         # CÁLCULO DE LA POSICIÓN DE IVA (Borrador F.2002)
         # ---------------------------------------------------------
-        
-        # 1. Determinación del Saldo Técnico
         diferencia_tecnica = total_debito_fiscal - total_credito_fiscal - saldo_tecnico_anterior
         
         if diferencia_tecnica < 0:
@@ -159,7 +185,6 @@ if file_emitidos and file_recibidos:
             saldo_tecnico_favor_contribuyente = 0.0
             saldo_tecnico_favor_arca = diferencia_tecnica
 
-        # 2. Determinación del Saldo Final (incorporando Libre Disponibilidad)
         if saldo_tecnico_favor_arca > 0:
             diferencia_final = saldo_tecnico_favor_arca - saldo_libre_disp_anterior
             if diferencia_final > 0:
@@ -188,7 +213,7 @@ if file_emitidos and file_recibidos:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Tabla detallada de la posición (se quitaron etiquetas HTML de los strings)
+        # Tabla detallada de la posición
         liquidacion_data = [
             {"Concepto": "(+) IVA Débito Fiscal (Ventas)", "Monto ($)": total_debito_fiscal},
             {"Concepto": "(-) IVA Crédito Fiscal (Compras)", "Monto ($)": -total_credito_fiscal},
@@ -295,4 +320,5 @@ if file_emitidos and file_recibidos:
         )
 
 else:
-    st.info("👋 Por favor, carga en el panel de la izquierda los archivos Excel de 'Mis Comprobantes Emitidos' y 'Mis Comprobantes Recibidos' para generar la posición de IVA.")
+    st.info("👋 Por favor, ingresá o cargá los datos de Ventas y el archivo Excel de 'Mis Comprobantes Recibidos' en el panel lateral para calcular la posición de IVA.")
+    
