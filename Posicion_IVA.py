@@ -83,6 +83,7 @@ def procesar_comprobantes(file, es_emitidos=True):
     Procesa el archivo Excel de AFIP adaptando la fila de encabezado,
     multiplicando por el tipo de cambio (si es moneda extranjera) y 
     asignando signos (+ / -) según la naturaleza del comprobante.
+    Si es comprobantes recibidos, excluye comprobantes tipo "B".
     """
     try:
         # Los encabezados de AFIP se encuentran en la fila 1 (índice 1 de pandas)
@@ -91,6 +92,10 @@ def procesar_comprobantes(file, es_emitidos=True):
         # Eliminar filas vacías o sin tipo de comprobante
         df = df.dropna(subset=['Tipo']).copy()
         
+        # Si son comprobantes recibidos, filtrar para excluir comprobantes tipo "B"
+        if not es_emitidos:
+            df = df[~df['Tipo'].astype(str).str.contains(r'\bB\b', regex=True, case=False)].copy()
+
         # Asegurar tipos numéricos y limpiar valores nulos
         cols_numericas = ['Tipo Cambio', 'Neto Gravado Total', 'Total IVA', 'Imp. Total']
         for col in cols_numericas:
@@ -183,15 +188,15 @@ if file_emitidos and file_recibidos:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # Tabla detallada de la posición
+        # Tabla detallada de la posición (se quitaron etiquetas HTML de los strings)
         liquidacion_data = [
             {"Concepto": "(+) IVA Débito Fiscal (Ventas)", "Monto ($)": total_debito_fiscal},
             {"Concepto": "(-) IVA Crédito Fiscal (Compras)", "Monto ($)": -total_credito_fiscal},
             {"Concepto": "(-) Saldo Técnico a Favor del Período Anterior", "Monto ($)": -saldo_tecnico_anterior},
-            {"Concepto": "<b>= SALDO TÉCNICO A FAVOR DEL CONTRIBUYENTE</b>" if saldo_tecnico_favor_contribuyente > 0 else "<b>= SALDO TÉCNICO A FAVOR DE ARCA</b>", 
+            {"Concepto": "= SALDO TÉCNICO A FAVOR DEL CONTRIBUYENTE" if saldo_tecnico_favor_contribuyente > 0 else "= SALDO TÉCNICO A FAVOR DE ARCA", 
              "Monto ($)": saldo_tecnico_favor_contribuyente if saldo_tecnico_favor_contribuyente > 0 else saldo_tecnico_favor_arca},
             {"Concepto": "(-) Saldo de Libre Disponibilidad Período Anterior", "Monto ($)": -saldo_libre_disp_anterior},
-            {"Concepto": "<b>= SALDO FINAL DEL PERÍODO (A FAVOR CONTRIBUYENTE - LIBRE DISP.)</b>" if saldo_final_a_pagar_arca == 0 else "<b>= SALDO FINAL A PAGAR A ARCA</b>",
+            {"Concepto": "= SALDO FINAL DEL PERÍODO (A FAVOR CONTRIBUYENTE - LIBRE DISP.)" if saldo_final_a_pagar_arca == 0 else "= SALDO FINAL A PAGAR A ARCA",
              "Monto ($)": saldo_final_libre_disp_remanente if saldo_final_a_pagar_arca == 0 else saldo_final_a_pagar_arca}
         ]
 
